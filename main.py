@@ -1194,27 +1194,69 @@ async def fetch_appx_html_to_json(session, url, headers=None, data=None):
 async def fetch_appx_video_id_details_v2(session, api, selected_batch_id, video_id, ytFlag, headers, folder_wise_course, user_id):
     logging.info(f"User ID: {user_id} - Fetching video details for video ID: {video_id}")
     try:
+        # 🚨 FIXED: Try without auth if auth headers fail
+        headers_noauth = {k: v for k, v in headers.items() if k.lower() not in ('authorization', 'user-id')}
+        
         res = await fetch_appx_html_to_json(session, f"{api}/get/fetchVideoDetailsById?course_id={selected_batch_id}&folder_wise_course={folder_wise_course}&ytflag={ytFlag}&video_id={video_id}", headers)
+        if not res or res.get('status') != 200:
+            res = await fetch_appx_html_to_json(session, f"{api}/get/fetchVideoDetailsById?course_id={selected_batch_id}&folder_wise_course={folder_wise_course}&ytflag={ytFlag}&video_id={video_id}", headers_noauth)
 
         output = []
         if res:
             data = res.get('data', [])
 
             if data:
-                Title = data["Title"]
-                uhs_version = data["uhs_version"]
+                Title = data.get("Title", f"Video {video_id}")
                 
-                res = await fetch_appx_html_to_json(session, f"{api}/get/get_mpd_drm_links?videoid={video_id}&folder_wise_course={folder_wise_course}", headers)
-                if res:
-                    drm_data = res.get('data', [])
-                    if drm_data and isinstance(drm_data, list) and len(drm_data) > 0:
-                        path = appx_decrypt(drm_data[0].get("path", "")) if drm_data and isinstance(drm_data, list) and drm_data and drm_data[0].get("path") else None
-                            
-                        if path:
-                            output.append(f"{Title}:{path}\n")
-                                
+                # 🚨 FIXED: Try direct video URL from response first
+                direct_video_url = (
+                    data.get('video_url') or data.get('videoUrl') or data.get('hls_url')
+                    or data.get('hlsUrl') or data.get('stream_url') or data.get('streamUrl')
+                    or data.get('media_url') or data.get('mediaUrl') or data.get('mpd_url')
+                    or data.get('mpdUrl') or data.get('download_url') or data.get('downloadUrl')
+                    or data.get('url') or data.get('file_url') or data.get('fileUrl')
+                    or data.get('source_url') or data.get('sourceUrl') or data.get('path')
+                    or data.get('link') or data.get('src') or data.get('video_link') or data.get('videoLink')
+                    or ""
+                )
+                
+                if direct_video_url:
+                    output.append(f"{Title}:{direct_video_url}\n")
+                else:
+                    # Try DRM links - without auth fallback
+                    res_drm = await fetch_appx_html_to_json(session, f"{api}/get/get_mpd_drm_links?videoid={video_id}&folder_wise_course={folder_wise_course}", headers)
+                    if not res_drm or res_drm.get('status') != 200:
+                        res_drm = await fetch_appx_html_to_json(session, f"{api}/get/get_mpd_drm_links?videoid={video_id}&folder_wise_course={folder_wise_course}", headers_noauth)
+                    
+                    if res_drm:
+                        drm_data = res_drm.get('data', [])
+                        if drm_data and isinstance(drm_data, list) and len(drm_data) > 0:
+                            path = appx_decrypt(drm_data[0].get("path", "")) if drm_data[0].get("path") else None
+                            if path:
+                                output.append(f"{Title}:{path}\n")
+                        
+                        # Try other DRM fields
+                        if not output and drm_data and isinstance(drm_data, list):
+                            for item in drm_data:
+                                for field in ['path', 'url', 'videoUrl', 'hlsUrl', 'mpdUrl', 'streamUrl', 'mediaUrl', 'downloadUrl', 'fileUrl', 'link', 'src']:
+                                    val = item.get(field)
+                                    if val:
+                                        try:
+                                            decrypted = appx_decrypt(val) if val else None
+                                            if decrypted and (decrypted.startswith('http') or decrypted.startswith('//')):
+                                                if decrypted.startswith('//'):
+                                                    decrypted = f"https:{decrypted}"
+                                                output.append(f"{Title}:{decrypted}\n")
+                                                break
+                                        except:
+                                            if val.startswith('http') or val.startswith('//'):
+                                                if val.startswith('//'):
+                                                    val = f"https:{val}"
+                                                output.append(f"{Title}:{val}\n")
+                                                break
+                
+                # PDF extraction (same as before)
                 pdf_link = appx_decrypt(data.get("pdf_link", "")) if data.get("pdf_link", "") and appx_decrypt(data.get("pdf_link", "")).endswith(".pdf") else None
-
                 is_pdf_encrypted = data.get("is_pdf_encrypted", 0)
                 if pdf_link:
                     if is_pdf_encrypted == 1 or is_pdf_encrypted == "1":
@@ -1225,7 +1267,8 @@ async def fetch_appx_video_id_details_v2(session, api, selected_batch_id, video_
                             output.append(f"{Title}:{pdf_link}\n")
                     else:
                         output.append(f"{Title}:{pdf_link}\n")
-                        
+
+                # Second PDF link
                 pdf_link2 = appx_decrypt(data.get("pdf_link2", "")) if data.get("pdf_link2", "") and appx_decrypt(data.get("pdf_link2", "")).endswith(".pdf") else None
                     
                 is_pdf2_encrypted = data.get("is_pdf2_encrypted", 0)
@@ -1288,28 +1331,106 @@ async def fetch_appx_folder_contents_v2(session, api, selected_batch_id, folder_
 async def fetch_appx_video_id_details_v3(session, api, selected_batch_id, video_id, ytFlag, headers, user_id):
     logging.info(f"User ID: {user_id} - Fetching video details V3 for video ID: {video_id}")
     try:
+        # 🚨 FIXED: Try with original headers first, then without auth if that fails
+        # Create two header versions: with auth and without
+        headers_noauth = {k: v for k, v in headers.items() if k.lower() not in ('authorization', 'user-id')}
+        
+        # Try with auth headers first (if present)
         res = await fetch_appx_html_to_json(session, f"{api}/get/fetchVideoDetailsById?course_id={selected_batch_id}&folder_wise_course=0&ytflag={ytFlag}&video_id={video_id}", headers)
-        with open("logs.txt", "a") as log_file:
-            log_file.write(f"{res}\n")
+        
+        # If failed, try without auth
+        if not res or res.get('status') != 200:
+            logging.info(f"User ID: {user_id} - Auth failed, trying without auth for video ID: {video_id}")
+            res = await fetch_appx_html_to_json(session, f"{api}/get/fetchVideoDetailsById?course_id={selected_batch_id}&folder_wise_course=0&ytflag={ytFlag}&video_id={video_id}", headers_noauth)
 
         output = []
         if res:
             data = res.get('data', [])
-
+            
+            # 🚨 FIXED: Check if data already has video URL directly (without needing drm_links)
             if data:
-                Title = data["Title"]
-                uhs_version = data["uhs_version"]
+                Title = data.get("Title", f"Video {video_id}")
                 
-                res = await fetch_appx_html_to_json(session, f"{api}/get/get_mpd_drm_links?folder_wise_course=0&videoid={video_id}", headers)
-                if res:
-                    drm_data = res.get('data', [])
-                    if drm_data and isinstance(drm_data, list) and len(drm_data) > 0:
-                        path = appx_decrypt(drm_data[0].get("path", "")) if drm_data and isinstance(drm_data, list) and drm_data and drm_data[0].get("path") else None
-                            
-                        if path:
-                            output.append(f"{Title}:{path}\n")
-                                
+                # Try to get video URL directly from the response data
+                direct_video_url = (
+                    data.get('video_url')
+                    or data.get('videoUrl')
+                    or data.get('hls_url')
+                    or data.get('hlsUrl')
+                    or data.get('stream_url')
+                    or data.get('streamUrl')
+                    or data.get('media_url')
+                    or data.get('mediaUrl')
+                    or data.get('mpd_url')
+                    or data.get('mpdUrl')
+                    or data.get('download_url')
+                    or data.get('downloadUrl')
+                    or data.get('url')
+                    or data.get('file_url')
+                    or data.get('fileUrl')
+                    or data.get('source_url')
+                    or data.get('sourceUrl')
+                    or data.get('path')
+                    or data.get('link')
+                    or data.get('src')
+                    or data.get('video_link')
+                    or data.get('videoLink')
+                    or ""
+                )
+                
+                if direct_video_url:
+                    output.append(f"{Title}:{direct_video_url}\n")
+                    logging.info(f"User ID: {user_id} - Direct video URL found in fetchVideoDetailsById for: {Title}")
+                else:
+                    # Try the DRM links endpoint
+                    # Try with auth first, then without
+                    res_drm = await fetch_appx_html_to_json(session, f"{api}/get/get_mpd_drm_links?folder_wise_course=0&videoid={video_id}", headers)
+                    if not res_drm or res_drm.get('status') != 200:
+                        res_drm = await fetch_appx_html_to_json(session, f"{api}/get/get_mpd_drm_links?folder_wise_course=0&videoid={video_id}", headers_noauth)
+                    
+                    if res_drm:
+                        drm_data = res_drm.get('data', [])
+                        if drm_data and isinstance(drm_data, list) and len(drm_data) > 0:
+                            path = appx_decrypt(drm_data[0].get("path", "")) if drm_data[0].get("path") else None
+                            if path:
+                                output.append(f"{Title}:{path}\n")
+                        else:
+                            drm_data = []
+                    else:
+                        drm_data = []
+                    
+                    # 🚨 FIXED: Also try other fields in DRM response
+                    if not output and drm_data and isinstance(drm_data, list):
+                        for item in drm_data:
+                            for field in ['path', 'url', 'videoUrl', 'hlsUrl', 'mpdUrl', 'streamUrl', 'mediaUrl', 'downloadUrl', 'fileUrl', 'link', 'src']:
+                                val = item.get(field)
+                                if val:
+                                    try:
+                                        decrypted = appx_decrypt(val) if val else None
+                                        if decrypted and (decrypted.startswith('http') or decrypted.startswith('//') or decrypted.startswith('/')):
+                                            if not decrypted.startswith('http'):
+                                                decrypted = f"https:{decrypted}" if decrypted.startswith('//') else f"{api.rstrip('/')}/{decrypted.lstrip('/')}"
+                                            output.append(f"{Title}:{decrypted}\n")
+                                            break
+                                    except:
+                                        if val.startswith('http') or val.startswith('//'):
+                                            if val.startswith('//'):
+                                                val = f"https:{val}"
+                                            output.append(f"{Title}:{val}\n")
+                                            break
+                
+                # Also extract PDF links from this response (backup)
                 pdf_link = appx_decrypt(data.get("pdf_link", "")) if data.get("pdf_link", "") and appx_decrypt(data.get("pdf_link", "")).endswith(".pdf") else None
+                is_pdf_encrypted = data.get("is_pdf_encrypted", 0)
+                if pdf_link:
+                    if is_pdf_encrypted == 1 or is_pdf_encrypted == "1":
+                        key = appx_decrypt(data.get("pdf_encryption_key", "")) if data.get("pdf_encryption_key") else None
+                        if key:
+                            output.append(f"{Title}:{pdf_link}*{key}\n")
+                        else:
+                            output.append(f"{Title}:{pdf_link}\n")
+                    else:
+                        output.append(f"{Title}:{pdf_link}\n")
 
                 is_pdf_encrypted = data.get("is_pdf_encrypted", 0)
                 if pdf_link:
@@ -1321,7 +1442,8 @@ async def fetch_appx_video_id_details_v3(session, api, selected_batch_id, video_
                             output.append(f"{Title}:{pdf_link}\n")
                     else:
                         output.append(f"{Title}:{pdf_link}\n")
-                        
+
+                # Second PDF link
                 pdf_link2 = appx_decrypt(data.get("pdf_link2", "")) if data.get("pdf_link2", "") and appx_decrypt(data.get("pdf_link2", "")).endswith(".pdf") else None
 
                 is_pdf2_encrypted = data.get("is_pdf2_encrypted", 0)
@@ -1436,12 +1558,62 @@ async def process_folder_wise_course_0(session, api, selected_batch_id, headers,
                                     all_outputs.append(f"{Title}:{thumbnail}\n")
                                     
                             elif item.get("material_type") == "VIDEO":
-                                if selected_batch_id is not None and video_id is not None and ytFlag is not None:
-                                    tasks.append(
-                                        fetch_appx_video_id_details_v3(session, api, selected_batch_id, video_id, ytFlag, headers, user_id))
+                                # 🚨 FIXED: First try to get video URL directly from item data
+                                # Many Appx platforms include video URL in the items list response
+                                direct_video_url = (
+                                    item.get('video_url')
+                                    or item.get('videoUrl')
+                                    or item.get('hls_url')
+                                    or item.get('hlsUrl')
+                                    or item.get('stream_url')
+                                    or item.get('streamUrl')
+                                    or item.get('media_url')
+                                    or item.get('mediaUrl')
+                                    or item.get('mpd_url')
+                                    or item.get('mpdUrl')
+                                    or item.get('download_url')
+                                    or item.get('downloadUrl')
+                                    or item.get('url')
+                                    or item.get('file_url')
+                                    or item.get('fileUrl')
+                                    or item.get('video_link')
+                                    or item.get('videoLink')
+                                    or item.get('source_url')
+                                    or item.get('sourceUrl')
+                                    or item.get('path')
+                                    or item.get('link')
+                                    or item.get('src')
+                                )
+                                
+                                # Also check if encrypted fields contain video URLs
+                                if not direct_video_url:
+                                    direct_video_url = (
+                                        appx_decrypt(item.get("pdf_link", "")) if item.get("pdf_link") and not appx_decrypt(item.get("pdf_link", "")).endswith(".pdf") else None
+                                        or appx_decrypt(item.get("pdf_link2", "")) if item.get("pdf_link2") and not appx_decrypt(item.get("pdf_link2", "")).endswith(".pdf") else None
+                                        or appx_decrypt(item.get("file_link", "")) if item.get("file_link") else None
+                                    )
+                                
+                                # If we found an encrypted path, try to build URL from it
+                                if direct_video_url:
+                                    if direct_video_url.startswith("http"):
+                                        all_outputs.append(f"{Title}:{direct_video_url}\n")
+                                        logging.info(f"User ID: {user_id} - Direct video URL found in items list for: {Title}")
+                                    elif direct_video_url and not direct_video_url.startswith("http"):
+                                        # Might be a relative path - try constructing full URL
+                                        if '/' in direct_video_url:
+                                            # Try to build from api base
+                                            api_base = api.rstrip('/')
+                                            constructed = f"{api_base}/{direct_video_url.lstrip('/')}"
+                                            all_outputs.append(f"{Title}:{constructed}\n")
+                                            logging.info(f"User ID: {user_id} - Constructed video URL from relative path: {constructed}")
                                 else:
-                                    logging.warning(
-                                        f"User ID: {user_id} - Skipping video due to None value: course_id={selected_batch_id}, video_id={video_id}, ytflag={ytFlag}")
+                                    # No direct URL found, fall back to API calls
+                                    if selected_batch_id is not None and video_id is not None and ytFlag is not None:
+                                        tasks.append(
+                                            fetch_appx_video_id_details_v3(session, api, selected_batch_id, video_id, ytFlag, headers, user_id))
+                                    else:
+                                        logging.warning(
+                                            f"User ID: {user_id} - Skipping video due to None value: course_id={selected_batch_id}, video_id={video_id}, ytflag={ytFlag}")
                     else:
                         logging.warning(f"User ID: {user_id} - No data found in livecourseclassbycoursesubtopconceptapiv3 API response")
             else:
@@ -1505,8 +1677,33 @@ async def process_folder_wise_course_1(session, api, selected_batch_id, headers,
                    all_outputs.append(f"{Title}:{thumbnail}\n")
                    
             elif item.get("material_type") == "VIDEO":
-                tasks.append(
-                    fetch_appx_video_id_details_v2(session, api, selected_batch_id, video_id, ytFlag, headers, 1, user_id))
+                # 🚨 FIXED: First try direct video URL from item data
+                direct_video_url = (
+                    item.get('video_url') or item.get('videoUrl') or item.get('hls_url')
+                    or item.get('hlsUrl') or item.get('stream_url') or item.get('streamUrl')
+                    or item.get('media_url') or item.get('mediaUrl') or item.get('mpd_url')
+                    or item.get('mpdUrl') or item.get('download_url') or item.get('downloadUrl')
+                    or item.get('url') or item.get('file_url') or item.get('fileUrl')
+                    or item.get('video_link') or item.get('videoLink') or item.get('source_url')
+                    or item.get('sourceUrl') or item.get('path') or item.get('link') or item.get('src')
+                )
+                if not direct_video_url:
+                    direct_video_url = (
+                        appx_decrypt(item.get("pdf_link", "")) if item.get("pdf_link") and not appx_decrypt(item.get("pdf_link", "")).endswith(".pdf") else None
+                        or appx_decrypt(item.get("pdf_link2", "")) if item.get("pdf_link2") and not appx_decrypt(item.get("pdf_link2", "")).endswith(".pdf") else None
+                        or appx_decrypt(item.get("file_link", "")) if item.get("file_link") else None
+                    )
+                if direct_video_url:
+                    if direct_video_url.startswith("http"):
+                        all_outputs.append(f"{Title}:{direct_video_url}\n")
+                        logging.info(f"User ID: {user_id} - Direct video URL in items list for: {Title}")
+                    elif '/' in direct_video_url:
+                        constructed = f"{api.rstrip('/')}/{direct_video_url.lstrip('/')}"
+                        all_outputs.append(f"{Title}:{constructed}\n")
+                        logging.info(f"User ID: {user_id} - Constructed video URL: {constructed}")
+                else:
+                    tasks.append(
+                        fetch_appx_video_id_details_v2(session, api, selected_batch_id, video_id, ytFlag, headers, 1, user_id))
 
             elif item.get("material_type") == "FOLDER":
                 tasks.append(fetch_appx_folder_contents_v2(session, api, selected_batch_id, item.get("id"), headers, 1, user_id))
@@ -1593,20 +1790,70 @@ async def process_appxwp(bot: Client, m: Message, user_id: int):
                 api = api = "https://" + api.replace("https://", "").replace("http://", "").rstrip("/")
                 selected_app_name = api
 
-            token = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpZCI6IjEwMTU1NTYyIiwiZW1haWwiOiJhbm9ueW1vdXNAZ21haWwuY29tIiwidGltZXN0YW1wIjoxNzQ1MDc5MzgyLCJ0ZW5hbnRUeXBlIjoidXNlciIsInRlbmFudE5hbWUiOiIiLCJ0ZW5hbnRJZCI6IiIsImRpc3Bvc2FibGUiOmZhbHNlfQ.EfwLhNtbzUVs1qRkMqc3P6ObkKSO0VYWKdAe6GmhdAg"
-            userid = "10155562"
-                
+            # 🚨 FIXED: Removed bogus placeholder token "eyJ0eX...hdAg"
+            # Video extraction now tries WITHOUT auth first (many Appx endpoints work without it)
+            # User can optionally provide a token by entering it at the app name prompt
+            token = None
+            userid = None
+            
+            # Check if user input looks like a JWT token instead of an app name
+            user_input = api
+            if user_input and user_input.count('.') == 2 and len(user_input) > 100:
+                # User provided a JWT token directly
+                token = user_input
+                await editable.edit("**Token received! Now enter App Name or Api**")
+                try:
+                    input1b = await bot.listen(chat_id=m.chat.id, filters=filters.user(user_id), timeout=120)
+                    api = input1b.text
+                    await input1b.delete(True)
+                except:
+                    await editable.edit("**Timeout! You took too long to respond**")
+                    return
+                if not (api.startswith("http://") or api.startswith("https://")):
+                    search_api = [term.strip() for term in api.split()]
+                    matches = find_appx_matching_apis(search_api)
+                    if matches:
+                        text = ''
+                        for cnt, item in enumerate(matches):
+                            name = item['name']
+                            api_url = item["api"]
+                            text += f'{cnt + 1}. ```\\n{name}:{api_url}```\\n'
+                        await editable.edit(f"**Send index number of the Batch to download.\\n\\n{text}**")
+                        try:
+                            input2b = await bot.listen(chat_id=m.chat.id, filters=filters.user(user_id), timeout=120)
+                            raw_text2b = input2b.text
+                            await input2b.delete(True)
+                        except:
+                            await editable.edit("**Timeout! You took too long to respond**")
+                            return
+                        if input2b.text.isdigit() and 1 <= int(input2b.text) <= len(matches):
+                            selected_api_index = int(input2b.text.strip())
+                            item = matches[selected_api_index - 1]
+                            api = item['api']
+                            selected_app_name = item['name']
+                        else:
+                            await editable.edit("**Error : Wrong Index Number**")
+                            return
+                    else:
+                        await editable.edit("**No matches found. Enter Correct App Starting Word**")
+                        return
+                else:
+                    api = "https://" + api.replace("https://", "").replace("http://", "").rstrip("/")
+                    selected_app_name = api
+            
             headers = {
                 'User-Agent': "okhttp/4.9.1",
                 'Accept-Encoding': "gzip",
                 'client-service': "Appx",
                 'auth-key': "appxapi",
-         #       'user-id': userid,
-         #       'authorization': token,
                 'user_app_category': "",
                 'language': "en",
                 'device_type': "ANDROID"
             }
+            # Only add auth if user provided a token
+            if token:
+                headers['authorization'] = f"Bearer {token}"
+                headers['user-id'] = userid or "0"
             
             res1 = await fetch_appx_html_to_json(session, f"{api}/get/courselist", headers)
             res2 = await fetch_appx_html_to_json(session, f"{api}/get/courselistnewv2", headers)
@@ -1688,13 +1935,22 @@ async def process_appxwp(bot: Client, m: Message, user_id: int):
             
             start_time = time.time()
             
-            headers = {
-                "Client-Service": "Appx",
-                "Auth-Key": "appxapi",
-                "source": "website",
-                "Authorization": token,
-                "User-ID": userid
-            }
+            headers = {}
+            # Only add auth headers if user provided a token
+            if token:
+                headers = {
+                    "Client-Service": "Appx",
+                    "Auth-Key": "appxapi",
+                    "source": "website",
+                    "Authorization": token,
+                    "User-ID": userid or "0"
+                }
+            else:
+                headers = {
+                    "Client-Service": "Appx",
+                    "Auth-Key": "appxapi",
+                    "source": "website",
+                }
 
             all_outputs = []
 
