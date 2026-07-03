@@ -137,15 +137,62 @@ async def process_pwwp_chapter_content(session: aiohttp.ClientSession, chapter_i
 
         if content_type in ("videos", "DppVideos"):
             video_details = data_item.get('videoDetails', {})
+            videoUrl = ""
             if video_details:
                 name = data_item.get('topic', '')
-                videoUrl = video_details.get('videoUrl') or video_details.get('embedCode') or ""
-            #    image = video_details.get('image', "")
+                # Try multiple field names for video URL
+                videoUrl = (
+                    video_details.get('videoUrl')
+                    or video_details.get('embedCode')
+                    or video_details.get('mediaUrl')
+                    or video_details.get('streamUrl')
+                    or video_details.get('hlsUrl')
+                    or video_details.get('mpdUrl')
+                    or video_details.get('downloadUrl')
+                    or video_details.get('url')
+                    or video_details.get('fileUrl')
+                    or ""
+                )
+                
+                # If embedCode is HTML (iframe), try to extract URL from it
+                if videoUrl and ('<' in videoUrl or 'iframe' in videoUrl.lower() or 'src=' in videoUrl.lower()):
+                    import re as re_extract
+                    src_match = re_extract.search(r'src=["\'](https?://[^"\']+)["\']', videoUrl)
+                    if src_match:
+                        videoUrl = src_match.group(1)
+                    else:
+                        # Try to find any URL in the embed code
+                        url_match = re_extract.search(r'https?://[^"\'\s<>]+', videoUrl)
+                        if url_match:
+                            videoUrl = url_match.group(0)
+                
+                # Also check if videoUrl is directly in data_item (not nested)
+                if not videoUrl:
+                    videoUrl = (
+                        data_item.get('videoUrl')
+                        or data_item.get('mediaUrl')
+                        or data_item.get('streamUrl')
+                        or data_item.get('hlsUrl')
+                        or data_item.get('mpdUrl')
+                        or data_item.get('url')
+                        or ""
+                    )
 
                 if videoUrl:
                     line = f"{name}:{videoUrl}"
                     content.append(line)
-               #     logging.info(line)
+                    
+            # Also check homeworkIds for video-type attachments
+            if not videoUrl:
+                homework_ids = data_item.get('homeworkIds', [])
+                for homework in homework_ids:
+                    attachment_ids = homework.get('attachmentIds', [])
+                    name = homework.get('topic', '')
+                    for attachment in attachment_ids:
+                        url = attachment.get('baseUrl', '') + attachment.get('key', '')
+                        if url and not url.endswith('.pdf'):
+                            line = f"{name}:{url}"
+                            content.append(line)
 
         elif content_type in ("notes", "DppNotes"):
             homework_ids = data_item.get('homeworkIds', [])
@@ -157,7 +204,6 @@ async def process_pwwp_chapter_content(session: aiohttp.ClientSession, chapter_i
                     if url:
                         line = f"{name}:{url}"
                         content.append(line)
-                    #    logging.info(line)
 
         return {content_type: content} if content else {}
     else:
@@ -180,6 +226,18 @@ async def fetch_pwwp_all_schedule(session: aiohttp.ClientSession, chapter_id, se
         if data and data.get("success") and data.get("data"):
             for item in data["data"]:
                 item['content_type'] = content_type
+                # Try to extract video URL directly from contents response
+                # (some API versions include it here without needing schedule-details call)
+                if content_type in ("videos", "DppVideos"):
+                    direct_url = (
+                        item.get('videoUrl')
+                        or item.get('mediaUrl')
+                        or (item.get('videoDetails') or {}).get('videoUrl')
+                        or (item.get('videoDetails') or {}).get('embedCode')
+                        or (item.get('videoDetails') or {}).get('url')
+                    )
+                    if direct_url:
+                        item['_pre_extracted_url'] = direct_url
                 all_schedule.append(item)
             page += 1
         else:
@@ -197,10 +255,20 @@ async def process_pwwp_chapters(session: aiohttp.ClientSession, chapter_id, sele
     for schedule in all_schedules:
         all_schedule.extend(schedule)
         
-    content_tasks = [
-        process_pwwp_chapter_content(session, chapter_id, selected_batch_id, subject_id, item["_id"], item['content_type'], headers)
-        for item in all_schedule
-    ]
+    content_tasks = []
+    for item in all_schedule:
+        schedule_id = item["_id"]
+        ct = item['content_type']
+        # If we already got the URL from contents API, use it directly
+        if ct in ("videos", "DppVideos") and item.get('_pre_extracted_url'):
+            # Create a simple task that returns the URL directly
+            async def _direct(sid=schedule_id, ct=ct, url=item['_pre_extracted_url']):
+                return {ct: [f"{sid}:{url}"]}
+            content_tasks.append(_direct())
+        else:
+            content_tasks.append(
+                process_pwwp_chapter_content(session, chapter_id, selected_batch_id, subject_id, schedule_id, ct, headers)
+            )
     content_results = await asyncio.gather(*content_tasks)
 
     combined_content = {}
@@ -293,30 +361,61 @@ async def get_pwwp_todays_schedule_content_details(session: aiohttp.ClientSessio
         data_item = data["data"]
         
         video_details = data_item.get('videoDetails', {})
+        videoUrl = ""
         if video_details:
             name = data_item.get('topic')
             
-            videoUrl = video_details.get('videoUrl') or video_details.get('embedCode')
-            image = video_details.get('image')
+            videoUrl = (
+                video_details.get('videoUrl')
+                or video_details.get('embedCode')
+                or video_details.get('mediaUrl')
+                or video_details.get('streamUrl')
+                or video_details.get('hlsUrl')
+                or video_details.get('mpdUrl')
+                or video_details.get('downloadUrl')
+                or video_details.get('url')
+                or video_details.get('fileUrl')
+                or ""
+            )
+            
+            # If embedCode is HTML, extract URL
+            if videoUrl and ('<' in videoUrl or 'iframe' in videoUrl.lower() or 'src=' in videoUrl.lower()):
+                import re as re_extract
+                src_match = re_extract.search(r'src=["\'](https?://[^"\']+)["\']', videoUrl)
+                if src_match:
+                    videoUrl = src_match.group(1)
+                else:
+                    url_match = re_extract.search(r'https?://[^"\'\s<>]+', videoUrl)
+                    if url_match:
+                        videoUrl = url_match.group(0)
+            
+            # Also check data_item
+            if not videoUrl:
+                videoUrl = (
+                    data_item.get('videoUrl')
+                    or data_item.get('mediaUrl')
+                    or data_item.get('streamUrl')
+                    or data_item.get('hlsUrl')
+                    or data_item.get('mpdUrl')
+                    or data_item.get('url')
+                    or ""
+                )
                 
             if videoUrl:
                 line = f"{name}:{videoUrl}\n"
                 content.append(line)
-           #     logging.info(line)
-               
-                          
-        homework_ids = data_item.get('homeworkIds')
-        for homework in homework_ids:
-            attachment_ids = homework.get('attachmentIds')
-            name = homework.get('topic')
-            for attachment in attachment_ids:
-            
-                url = attachment.get('baseUrl', '') + attachment.get('key', '')
-                        
-                if url:
-                    line = f"{name}:{url}\n"
-                    content.append(line)
-                #    logging.info(line)
+        
+        # Also check homeworkIds for non-pdf attachments (videos)
+        if not videoUrl:
+            homework_ids = data_item.get('homeworkIds')
+            for homework in homework_ids or []:
+                attachment_ids = homework.get('attachmentIds')
+                name = homework.get('topic')
+                for attachment in attachment_ids or []:
+                    url = attachment.get('baseUrl', '') + attachment.get('key', '')
+                    if url and not url.endswith('.pdf'):
+                        line = f"{name}:{url}\n"
+                        content.append(line)
                 
         dpp = data_item.get('dpp')
         if dpp:
