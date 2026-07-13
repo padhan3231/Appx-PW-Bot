@@ -79,35 +79,29 @@ bot = Client(
 
 @bot.on_message(filters.command(["start"]))
 async def start(bot, message):
-  random_image_url = random.choice(image_list)
+    random_image_url = random.choice(image_list)
 
-  keyboard = [
-    [
-      InlineKeyboardButton("🚀 Physics Wallah without Purchase 🚀", callback_data="pwwp")
-    ],
-    [
-      InlineKeyboardButton("📘 Classplus without Purchase 📘", callback_data="cpwp")
-    ],
-    [
-      InlineKeyboardButton("📒 Appx Without Purchase 📒", callback_data="appxwp")
+    keyboard = [
+        [
+            InlineKeyboardButton("🚀 Physics Wallah without Purchase 🚀", callback_data="pwwp")
+        ],
+        [
+            InlineKeyboardButton("📘 Classplus without Purchase 📘", callback_data="cpwp")
+        ],
+        [
+            InlineKeyboardButton("📒 Appx Without Purchase 📒", callback_data="appxwp")
+        ]
     ]
-  ]
 
-  reply_markup = InlineKeyboardMarkup(keyboard)
+    reply_markup = InlineKeyboardMarkup(keyboard)
 
-  await message.reply_photo(
-    photo=random_image_url,
-    caption="**Developer - @pwextractowner\nPLEASE👇PRESS👇HERE**",
-    quote=True,
-    reply_markup=reply_markup
-  )
-@bot.on_message(group=2)
-#async def account_login(bot: Client, m: Message):
-#    try:
-#        await bot.forward_messages(chat_id=chat_id, from_chat_id=m.chat.id, message_ids=m.id)
-#    except:
-#        pass
-        
+    await message.reply_photo(
+        photo=random_image_url,
+        caption="**Developer - @pwextractowner\nPLEASE👇PRESS👇HERE**",
+        quote=True,
+        reply_markup=reply_markup
+    )
+
 async def fetch_pwwp_data(session: aiohttp.ClientSession, url: str, headers: Dict = None, params: Dict = None, data: Dict = None, method: str = 'GET') -> Any:
     max_retries = 3
     for attempt in range(max_retries):
@@ -181,7 +175,6 @@ async def process_pwwp_chapter_content(session: aiohttp.ClientSession, chapter_i
                 if videoUrl:
                     line = f"{name}:{videoUrl}"
                     content.append(line)
-                    
             # Also check homeworkIds for video-type attachments
             if not videoUrl:
                 homework_ids = data_item.get('homeworkIds', [])
@@ -468,7 +461,7 @@ async def pwwp_callback(bot, callback_query):
     
     auth_user = auth_users[0]
     user = await bot.get_users(auth_user)
-    owner_username = "@" + user.username
+    owner_username = "@" + user.username if user.username else str(user.id)
 
     if user_id not in auth_users:
         await bot.send_message(callback_query.message.chat.id, f"**You Are Not Subscribed To This Bot\nContact - {owner_username}**")
