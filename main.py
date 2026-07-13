@@ -2019,7 +2019,60 @@ async def process_appxwp(bot: Client, m: Message, user_id: int):
             if session:
                 await session.close()
             await CONNECTOR.close()
+import yt_dlp
+import time
 
+@bot.on_message(filters.command(["dl"]))
+async def download_m3u8(bot: Client, message: Message):
+    user_id = message.from_user.id
+    
+    # Security check: Sirf aap (auth_users) isko use kar paayein
+    if user_id not in auth_users:
+        await message.reply_text("**You Are Not Subscribed To This Bot**")
+        return
+        
+    if len(message.command) < 2:
+        await message.reply_text("**Sahi format:** `/dl <aapka_m3u8_link>`\n\nExample: `/dl https://link.m3u8`")
+        return
+        
+    url = message.text.split(" ", 1)[1].strip()
+    editable = await message.reply_text("**📥 Downloading started... Isme thoda time lag sakta hai ⏳**")
+    
+    # Unique file name banayenge taaki clash na ho
+    file_name = f"video_{user_id}_{int(time.time())}.mp4"
+    
+    ydl_opts = {
+        'format': 'best',
+        'outtmpl': file_name,
+        'quiet': True,
+        'no_warnings': True
+    }
+    
+    try:
+        # Background mein yt-dlp se download start karein
+        def extract_video():
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
+        
+        await bot.loop.run_in_executor(None, extract_video)
+        
+        await editable.edit("**✅ Download complete! Telegram par Upload kar raha hu 🚀...**")
+        
+        # Telegram par video bhejna
+        await message.reply_video(
+            video=file_name, 
+            caption="**Lejiye aapka video! 🎬**",
+            supports_streaming=True
+        )
+        await editable.delete()
+        
+    except Exception as e:
+        await editable.edit(f"**❌ Error aagaya:** `{str(e)}`")
+    
+    finally:
+        # Heroku ki memory free karne ke liye file ko delete karna zaruri hai
+        if os.path.exists(file_name):
+            os.remove(file_name)
 
                                         
 bot.run()
